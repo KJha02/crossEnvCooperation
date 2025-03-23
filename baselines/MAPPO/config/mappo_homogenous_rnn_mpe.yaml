@@ -1,0 +1,26 @@
+"LR": 2e-3
+"NUM_ENVS": 16 
+"NUM_STEPS": 128 
+"TOTAL_TIMESTEPS": 1e7
+"FC_DIM_SIZE": 128
+"GRU_HIDDEN_DIM": 128
+"UPDATE_EPOCHS": 4
+"NUM_MINIBATCHES": 4
+"GAMMA": 0.99
+"GAE_LAMBDA": 0.95
+"CLIP_EPS": 0.2
+"SCALE_CLIP_EPS": False
+"ENT_COEF": 0.01
+"VF_COEF": 0.5
+"MAX_GRAD_NORM": 0.5
+"ACTIVATION": "tanh"
+"ENV_NAME": "MPE_simple_spread_v3"
+"SEED": 1
+"NUM_SEEDS": 2
+"ENV_KWARGS": {}
+"ANNEAL_LR": True
+
+# WandB Params
+"WANDB_MODE": "disabled"
+"ENTITY": ""
+"PROJECT": ""

@@ -1,0 +1,50 @@
+ENV_NAME: ToyCoop
+LR: 0.0003
+NUM_ENVS: 256
+NUM_SEEDS: 1
+NUM_STEPS: 256
+FC_DIM_SIZE: 256
+GRU_HIDDEN_DIM: 256
+TOTAL_TIMESTEPS: 100000000.0
+MAX_TRAIN_STEPS: 3000000000.0
+UPDATE_EPOCHS: 4
+NUM_MINIBATCHES: 2
+GAMMA: 0.99
+GAE_LAMBDA: 0.95
+CLIP_EPS: 0.2
+SCALE_CLIP_EPS: false
+ENT_COEF: 0.005
+VF_COEF: 1.0
+MOA_COEF: 1.0
+MAX_GRAD_NORM: 0.5
+ACTIVATION: relu
+ANNEAL_LR: true
+SEED: 0
+ENV_KWARGS:
+  random_reset: true
+  max_steps: 256
+  check_held_out: false
+  debug: true
+  shuffle_inv_and_pot: false
+  layout: cramped_room_9
+  random_reset_fn: reset_all
+TRAINING: true
+TRAIN_KWARGS:
+  ckpt_id: 0
+  overwrite_ckpt: true
+  finetune: false
+  e3t_beta: 0.55
+TEST_KWARGS:
+  beta: 1.0
+  argmax: false
+  num_trajs: 2
+  plot: true
+  self_play: false
+  ik: true
+  debug: false
+  use_ckpt: true
+GRAPH_NET: false
+FCP: false
+ENTITY: social-rl
+PROJECT: ''
+WANDB_MODE: disabled

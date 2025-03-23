@@ -1,0 +1,29 @@
+# requirements are alligned with nvcr.io/nvidia/jax:23.10-py3 image
+# jax==0.4.18
+# jaxlib==0.4.18
+jax-tqdm==0.2.2
+jraph==0.0.6.dev0
+flax==0.7.4
+chex==0.1.84
+optax==0.1.7
+dotmap==1.3.30
+evosax==0.1.5
+distrax==0.1.5
+brax==0.10.0
+gymnax==0.0.6
+safetensors==0.4.2
+flashbax==0.1.0
+# less sensitive libs
+wandb==0.16.2
+pytest==8.1.1
+pygame==2.5.2
+numpy==1.26.4
+scipy==1.12.0
+hydra-core==1.3.2
+omegaconf==2.3.0
+matplotlib==3.8.4
+pillow==10.3.0
+pettingzoo==1.24.3
+tqdm==4.66.1
+imageio==2.36.1
+seaborn==0.13.2

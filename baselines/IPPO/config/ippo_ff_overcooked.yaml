@@ -1,0 +1,40 @@
+"LR": 2.5e-4
+"NUM_ENVS": 32
+"NUM_STEPS": 256
+"TOTAL_TIMESTEPS": 2e8
+"NUM_CHECKPOINTS": 1
+"UPDATE_EPOCHS": 4
+"NUM_MINIBATCHES": 4
+"GAMMA": 0.99
+"GAE_LAMBDA": 0.95
+"CLIP_EPS": 0.2
+"ENT_COEF": 0.01
+"VF_COEF": 0.5
+"MOA_COEF": 0.2
+"MAX_GRAD_NORM": 0.5
+"ACTIVATION": "relu"
+"ENV_NAME": "overcooked" 
+"ENV_KWARGS": 
+  "layout" : "cramped_room_padded"
+  "random_reset" : True
+  "max_steps": 256
+  "single_agent": False
+  "training": True
+"ANNEAL_LR": True
+"NUM_TEST_EPOCHS": 100
+"TRAINING": True
+"HELD_OUT": False
+"SINGLE_AGENT": False
+"PLOT": True
+"LOAD_MODEL": False
+"SELF_PLAY": False
+"SEED": 71
+"LSTM": False
+"MODEL_TYPE": "graph"
+"MODEL_OTHER_AGENT": False
+"SHARE_WEIGHTS": False
+"COMPARE_PROC_FIXED": False
+"CHECKPOINT_ID": 0
+"E3T_BASELINE": False
+"E3T_EPSILON": 0.0
+"FCP_BASELINE": False
