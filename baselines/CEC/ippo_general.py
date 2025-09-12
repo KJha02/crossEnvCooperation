@@ -85,16 +85,17 @@ def initialize_environment(config):
             (i,) = runner_state
             key = jax.random.key(i)
             state = env.custom_reset_fn(key, random_reset=True)
-            res = (state.agent_pos, state.goal_pos)
+            res = (state.agent_pos, state.goal_pos, state.other_goal_pos)
             carry = (i+1,)
             return carry, res
         
         carry, res = jax.lax.scan(gen_held_out_toycoop, (0,), jnp.arange(100), 100)
-        ho_agent_pos, ho_goal_pos = res
+        ho_agent_pos, ho_goal_pos, ho_other_goal_pos = res
         
         # Set the held-out states in the environment
         env.held_out_agent_pos = ho_agent_pos
         env.held_out_goal_pos = ho_goal_pos
+        env.held_out_other_goal_pos = ho_other_goal_pos
     config["obs_dim"] = env.observation_space(env.agents[0]).shape
     return env
 
@@ -135,38 +136,24 @@ class ActorCriticRNN(nn.Module):
     @nn.compact
     def __call__(self, hidden, x):
         obs, dones, agent_positions = x
+        batch_size, num_envs, flattened_obs_dim = obs.shape
         if self.config["GRAPH_NET"]:
-            batch_size, num_envs, flattened_obs_dim = obs.shape
-            # if self.config["ENV_NAME"] == "overcooked":
-            #     reshaped_obs = obs.reshape(-1, 7,7,26)
-            # else:
-            #     reshaped_obs = obs.reshape(-1, 5,5,3)
-            reshaped_obs = obs.reshape(-1, *self.config["obs_dim"])
-            # # use 2 conv nets
-            # embedding = nn.Conv(
-            #     features=self.config["FC_DIM_SIZE"]*2,
-            #     kernel_size=(2, 2),
-            #     kernel_init=orthogonal(np.sqrt(2)),
-            #     bias_init=constant(0.0),
-            # )(reshaped_obs)
-            # embedding = nn.relu(embedding)
-            # embedding = nn.Conv(
-            #     features=self.config["FC_DIM_SIZE"],
-            #     kernel_size=(2, 2),
-            #     kernel_init=orthogonal(np.sqrt(2)),
-            #     bias_init=constant(0.0),
-            # )(embedding)
-            # embedding = nn.relu(embedding)
+            if self.config["ENV_NAME"] == "overcooked":
+                reshaped_obs = obs.reshape(-1, 7,7,26)
+            else:
+                reshaped_obs = obs.reshape(-1, 5,5,4)
 
             embedding = nn.Conv(
-                features=64 if "9" in self.config['layout_name'] else 2 * self.config["FC_DIM_SIZE"],
+                # features=64 if "9" in self.config['layout_name'] and self.config["ENV_NAME"] == "overcooked")else 2 * self.config["FC_DIM_SIZE"],
+                features=64,
                 kernel_size=(2, 2),
                 kernel_init=orthogonal(np.sqrt(2)),
                 bias_init=constant(0.0),
             )(reshaped_obs)
             embedding = nn.relu(embedding)
             embedding = nn.Conv(
-                features=32 if "9" in self.config['layout_name'] else self.config["FC_DIM_SIZE"],
+                # features=32 if "9" in self.config['layout_name'] and self.config["ENV_NAME"] == "overcooked") else self.config["FC_DIM_SIZE"],
+                features=32,
                 kernel_size=(2, 2),
                 kernel_init=orthogonal(np.sqrt(2)),
                 bias_init=constant(0.0),
@@ -183,12 +170,19 @@ class ActorCriticRNN(nn.Module):
         embedding = nn.relu(embedding)
 
         embedding = nn.Dense(
-            self.config["FC_DIM_SIZE"] * 2 if "9" in self.config['layout_name'] else self.config["FC_DIM_SIZE"], kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            # self.config["FC_DIM_SIZE"] * 2 if "9" in self.config['layout_name'] else self.config["FC_DIM_SIZE"], 
+            self.config["FC_DIM_SIZE"] * 2,
+            kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(embedding)
         embedding = nn.relu(embedding)
 
-        rnn_in = (embedding, dones)
-        hidden, embedding = ScannedRNN()(hidden, rnn_in)
+        if self.config["LSTM"]:
+            rnn_in = (embedding, dones)
+            hidden, embedding = ScannedRNN()(hidden, rnn_in)
+        else:
+            embedding = nn.Dense(self.config["GRU_HIDDEN_DIM"], kernel_init=orthogonal(2), bias_init=constant(0.0))(embedding)
+            embedding = nn.relu(embedding)
+        embedding = embedding.reshape((batch_size, num_envs, -1))
 
         #########
         # Actor
@@ -290,7 +284,6 @@ def make_train(config, update_step=0):
     config["obs_dim"] = env.observation_space(env.agents[0]).shape
 
     obs, state = env.reset(jax.random.PRNGKey(0), params={'random_reset_fn': config['ENV_KWARGS']['random_reset_fn']})
-    
 
     env = LogWrapper(env, env_params={'random_reset_fn': config['ENV_KWARGS']['random_reset_fn']})
 
@@ -643,6 +636,13 @@ def main(config):
     else:
         fcp_prefix = ""
         finetune_appendage = "_improved"
+    
+    if config['ENV_KWARGS']['partial_obs']:
+        finetune_appendage += "_partial_obs"
+    if not config['LSTM']:
+        finetune_appendage += "_no_lstm"
+    if config['ENV_KWARGS']['incentivize_strat'] != 2:
+        finetune_appendage += f"_incentivize_strat_{config['ENV_KWARGS']['incentivize_strat']}"
     wandb.init(
         entity=config["ENTITY"],
         project=config["PROJECT"],
@@ -793,6 +793,7 @@ def main(config):
     plt.close()
 
     print(f"Finished training for seed {config['SEED']} with ckpt {config['TRAIN_KWARGS']['ckpt_id']}")
+    print(f'Saved to {filepath}/{fcp_prefix}train_info_seed{config["SEED"]}_ckpt{config["TRAIN_KWARGS"]["ckpt_id"]}{finetune_appendage}.png')
     
     
     '''updates_x = jnp.arange(out["metrics"]["total_loss"][0].shape[0])

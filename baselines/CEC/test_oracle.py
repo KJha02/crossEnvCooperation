@@ -94,18 +94,17 @@ def initialize_environment(config):
             (i,) = runner_state
             key = jax.random.key(i)
             state = env.custom_reset_fn(key, random_reset=True)
-            res = (state.agent_pos, state.goal_pos, state.other_goal_pos)
+            res = (state.agent_pos, state.goal_pos)
             carry = (i+1,)
             return carry, res
         
         carry, res = jax.lax.scan(gen_held_out_toycoop, (0,), jnp.arange(100), 100)
-        ho_agent_pos, ho_goal_pos, ho_other_goal_pos = res
+        ho_agent_pos, ho_goal_pos = res
         
         # Set the held-out states in the environment
         env.held_out_agent_pos = ho_agent_pos
         env.held_out_goal_pos = ho_goal_pos
-        env.held_out_other_goal_pos = ho_other_goal_pos
-        config["obs_dim"] = (5,5,4)
+        config["obs_dim"] = (5,5,3)
     else:
         config["obs_dim"] = env.observation_space(env.agents[0]).shape
     return env
@@ -144,6 +143,7 @@ class ScannedRNN(nn.Module):
 class ActorCriticRNN(nn.Module):
     action_dim: Sequence[int]
     config: Dict
+    oracle: bool = False
 
     @nn.compact
     def __call__(self, hidden, x):
@@ -153,17 +153,17 @@ class ActorCriticRNN(nn.Module):
             if self.config["ENV_NAME"] == "overcooked":
                 reshaped_obs = obs.reshape(-1, 7,7,26)
             else:
-                reshaped_obs = obs.reshape(-1, 5,5,4)
+                reshaped_obs = obs.reshape(-1, 5,5,3)
 
             embedding = nn.Conv(
-                features=64 if "9" in self.config['layout_name'] else 2 * self.config["FC_DIM_SIZE"],
+                features=64 if "9" in self.config['layout_name'] and (self.config["ENV_NAME"] == "overcooked" or self.oracle) else 2 * self.config["FC_DIM_SIZE"],
                 kernel_size=(2, 2),
                 kernel_init=orthogonal(np.sqrt(2)),
                 bias_init=constant(0.0),
             )(reshaped_obs)
             embedding = nn.relu(embedding)
             embedding = nn.Conv(
-                features=32 if "9" in self.config['layout_name'] else self.config["FC_DIM_SIZE"],
+                features=32 if "9" in self.config['layout_name'] and (self.config["ENV_NAME"] == "overcooked" or self.oracle) else self.config["FC_DIM_SIZE"],
                 kernel_size=(2, 2),
                 kernel_init=orthogonal(np.sqrt(2)),
                 bias_init=constant(0.0),
@@ -180,7 +180,7 @@ class ActorCriticRNN(nn.Module):
         embedding = nn.relu(embedding)
 
         embedding = nn.Dense(
-            self.config["FC_DIM_SIZE"] * 2 if "9" in self.config['layout_name'] else self.config["FC_DIM_SIZE"], kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            self.config["FC_DIM_SIZE"] * 2 if "9" in self.config['layout_name'] and (self.config["ENV_NAME"] == "overcooked" or self.oracle) else self.config["FC_DIM_SIZE"], kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(embedding)
         embedding = nn.relu(embedding)
 
@@ -246,7 +246,7 @@ class ActorCriticRNN(nn.Module):
         return hidden, pi, jnp.squeeze(critic, axis=-1)
 
 
-def get_rollouts(model_param_1, model_param_2, config, env, network, seed=0):
+def get_rollouts(model_param_1, model_param_2, config, env, network_1, network_2, seed=0):
     
     def _step(carry, unused):
         train_state_params_1, train_state_params_2, env_state, last_obs, last_done, hstate_1, hstate_2, rng = carry
@@ -261,9 +261,9 @@ def get_rollouts(model_param_1, model_param_2, config, env, network, seed=0):
             last_done[np.newaxis, :],
             agent_positions[np.newaxis, :]
         )
-        hstate_1, pi_1, value_1 = network.apply(train_state_params_1, hstate_1, ac_in)
+        hstate_1, pi_1, value_1 = network_1.apply(train_state_params_1, hstate_1, ac_in)
         pi_1 = distrax.Categorical(logits=pi_1.logits * config["TEST_KWARGS"]["beta"])
-        hstate_2, pi_2, value_2 = network.apply(train_state_params_2, hstate_2, ac_in)
+        hstate_2, pi_2, value_2 = network_2.apply(train_state_params_2, hstate_2, ac_in)
         pi_2 = distrax.Categorical(logits=pi_2.logits * config["TEST_KWARGS"]["beta"])
 
         action_1 = pi_1.sample(seed=_rng)[0]
@@ -339,10 +339,8 @@ def main(config):
     # make path if it doesn't exist
     os.makedirs(filepath, exist_ok=True)
 
-    if config['FCP_KWARGS']['train_oracle'] and config['FCP'] and config['ENV_KWARGS']['incentivize_strat'] == 2:
+    if config['FCP_KWARGS']['train_oracle'] and config['FCP']:
         finetune_appendage += '_oracle'
-    if config['ENV_KWARGS']['incentivize_strat'] != 2:
-        finetune_appendage += f"_incentivize_strat_{config['ENV_KWARGS']['incentivize_strat']}"
 
     ##################
     # Load all models for current ckpt id
@@ -364,8 +362,39 @@ def main(config):
                 param_list.append(model_params)
                 seed_list.append(seed)
                 del previous_ckpt
+            print(f"Loaded model from {load_path}/{fcp_str}seed{seed}_ckpt{config['TRAIN_KWARGS']['ckpt_id']}{finetune_appendage}.pkl")
         except:
-            continue
+            # temp_path = f"{load_path}/{fcp_str}seed{seed}_ckpt{config['TRAIN_KWARGS']['ckpt_id']}{finetune_appendage}.pkl"
+            full_path = f"/mmfs1/gscratch/socialrl/kjha/TakedownCooked/ckpts/ippo/ToyCoop/ikTrue/graph{config['GRAPH_NET']}/{fcp_str}seed{seed}_ckpt{config['TRAIN_KWARGS']['ckpt_id']}{finetune_appendage}.pkl"
+            
+            # path = f"ckpts/ippo/{config['ENV_NAME']}/ikFalse/{config['ENV_KWARGS']['random_reset_fn']}/graph{config['GRAPH_NET']}"
+            # full_path = f"{path}/seed3_ckpt16_improved_incentivize_strat_0.pkl"
+            with open(full_path, "rb") as f:
+                previous_ckpt = pickle.load(f)
+                model_params = previous_ckpt['params']
+                param_list.append(model_params)
+                seed_list.append(seed)
+                del previous_ckpt
+            # print(f"Loaded model from {full_path}")
+
+    
+    # load both of the strategies
+    frozen_param_stack = []
+    if config['FCP_KWARGS']['train_oracle']:
+        # only load 2 strategies
+        path = f"ckpts/ippo/{config['ENV_NAME']}/ikFalse/{config['ENV_KWARGS']['random_reset_fn']}/graph{config['GRAPH_NET']}"
+        path1 = f"{path}/seed3_ckpt16_improved_incentivize_strat_0.pkl"
+        path2 = f"{path}/seed3_ckpt16_improved_incentivize_strat_1.pkl"
+        with open(path1, "rb") as f:
+            frozen_ckpt = pickle.load(f)
+            frozen_param_stack.append(frozen_ckpt['params'])
+        with open(path2, "rb") as f:
+            frozen_ckpt = pickle.load(f)
+            frozen_param_stack.append(frozen_ckpt['params'])
+    num_stacked_params = len(frozen_param_stack)
+    frozen_param_stack = jax.tree_map(lambda *x: jnp.stack(x), *frozen_param_stack)
+    other_seed_list = jnp.arange(num_stacked_params)
+
     if len(param_list) == 0:
         print(f"No models found")
         print(f"Loading from {load_path}/{fcp_str}seed{seed}_ckpt{config['TRAIN_KWARGS']['ckpt_id']}{finetune_appendage}.pkl")
@@ -375,7 +404,7 @@ def main(config):
     param_stack = jax.tree_map(lambda *x: jnp.stack(x), *param_list)      # stack params
 
     # i want to get all pairs of seeds as a single array of (# pairs, 2)
-    seed_pairs = jnp.array(jnp.meshgrid(jnp.arange(len(seed_list)), jnp.arange(len(seed_list))))
+    seed_pairs = jnp.array(jnp.meshgrid(jnp.arange(len(seed_list)), jnp.arange(len(other_seed_list))))
     seed_pairs = seed_pairs.reshape((2, -1)).T
 
     ##################
@@ -383,27 +412,28 @@ def main(config):
     ##################
     env = initialize_environment(config)
     env = LogWrapper(env, env_params={'random_reset_fn': config['ENV_KWARGS']['random_reset_fn']})
-    network = ActorCriticRNN(env.action_space("agent_0").n, config=config)
+    network_1 = ActorCriticRNN(env.action_space("agent_0").n, config=config, oracle=False)
+    network_2 = ActorCriticRNN(env.action_space("agent_0").n, config=config, oracle=True)
 
     
     ##################
     # Evaluate pairs
     ##################
     @jax.jit
-    def eval_pair(seed_pair, seed_list, param_stack, config=config, env=env, network=network):
+    def eval_pair(seed_pair, seed_list, other_seed_list, param_stack, other_param_stack, config=config, env=env, network_1=network_1, network_2=network_2):
         seed_1, seed_2 = seed_pair[0], seed_pair[1]
         param_1 = jax.tree_map(lambda x: x[seed_1], param_stack)
-        param_2 = jax.tree_map(lambda x: x[seed_2], param_stack)
+        param_2 = jax.tree_map(lambda x: x[seed_2], other_param_stack)
 
-        (trajectories, init_env_states, init_obsvs) = get_rollouts(param_1, param_2, config, env, network)
+        (trajectories, init_env_states, init_obsvs) = get_rollouts(param_1, param_2, config, env, network_1, network_2)
         rewards = trajectories[4]['agent_0'].sum(axis=1)  # axis 1 is originally each timestep in a single trajectory, want cumulative reward by end
         true_seed_1 = seed_list[seed_1]
-        true_seed_2 = seed_list[seed_2]
+        true_seed_2 = other_seed_list[seed_2]
         return (true_seed_1, true_seed_2, rewards, trajectories, init_env_states)
     
     if not config['TEST_KWARGS']['plot']:
-        eval_pair_fn = jax.jit(jax.vmap(eval_pair, in_axes=(0, None, None)))
-        eval_pair_res = eval_pair_fn(seed_pairs, seed_list, param_stack)
+        eval_pair_fn = jax.jit(jax.vmap(eval_pair, in_axes=(0, None, None, None, None)))
+        eval_pair_res = eval_pair_fn(seed_pairs, seed_list, other_seed_list, param_stack, frozen_param_stack)
         true_seed_1, true_seed_2, rewards, trajectories, init_env_states = eval_pair_res
         ##################
         # Save data
@@ -417,6 +447,8 @@ def main(config):
                 df_dict['seed_2'].append(seed_2)
                 df_dict['reward'].append(reward)
         df = pd.DataFrame(df_dict)
+        if '_oracle' not in finetune_appendage:
+            finetune_appendage += '_oracle'
         df.to_csv(f"{filepath}/{fcp_str}eval_on_ik{config['ENV_KWARGS']['random_reset']}_ckpt{config['TRAIN_KWARGS']['ckpt_id']}{finetune_appendage}.csv", index=False)
         print(f"Saved data to {filepath}/{fcp_str}eval_on_ik{config['ENV_KWARGS']['random_reset']}_ckpt{config['TRAIN_KWARGS']['ckpt_id']}{finetune_appendage}.csv")
     else:
@@ -425,11 +457,11 @@ def main(config):
             seed_val = seed_pairs[sp_seeds]
             seed_0, seed_1 = seed_val[0], seed_val[1]
 
-            seed_0, seed_1, rewards, trajectories, init_env_states = eval_pair([seed_0, seed_1], seed_list, param_stack)
+            seed_0, seed_1, rewards, trajectories, init_env_states = eval_pair([seed_0, seed_1], seed_list, other_seed_list, param_stack, frozen_param_stack)
             all_freq_counts = []
             all_coordinate_embeddings = []
-            for traj_num in tqdm(range(config['TEST_KWARGS']['num_trajs'])): 
-                traj = jax.tree_map(lambda x: x[traj_num], trajectories)  # get current trajectory from (num_trajs, num_timesteps, ...) output
+            for traj_num in tqdm(range(config['TEST_KWARGS']['num_trajs'])):
+                traj = jax.tree_map(lambda x: x[traj_num], trajectories)
                 env_states = [jax.tree_map(lambda x: x[traj_num], init_env_states)]
                 traj_rewards = [0]
                 action_probs_0 = []
@@ -439,7 +471,7 @@ def main(config):
                 coordinate_embeddings = []
                 freq_count = None
                 for timepoint in range(config['NUM_STEPS']):
-                    timestep = jax.tree_map(lambda x: x[timepoint], traj)  # get the current timestep from trajectories
+                    timestep = jax.tree_map(lambda x: x[timepoint], traj)
 
                     action_dict = timestep[3]
                     action_0.append(action_dict[env.agents[0]])
@@ -518,7 +550,7 @@ def main(config):
                     loop=0  # 0 means loop forever
                 )
                 print(f"Saved gif to {filepath}/{fcp_str}seed{seed_0}x{seed_1}_{fcp_str}eval_on_ik{config['ENV_KWARGS']['random_reset']}_ckpt{config['TRAIN_KWARGS']['ckpt_id']}{finetune_appendage}_traj{traj_num}.gif")
-
+            break
 if __name__ == "__main__":
     main()
 

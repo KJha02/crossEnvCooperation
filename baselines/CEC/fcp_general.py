@@ -22,8 +22,6 @@ import jaxmarl
 from jaxmarl.wrappers.baselines import LogWrapper
 from jaxmarl.environments.overcooked import overcooked_layouts
 
-from graph_layer import make_graph_toy_coop, GATLayer, make_graph_overcooked
-
 import wandb
 import functools
 import pdb
@@ -67,16 +65,17 @@ def initialize_environment(config):
             (i,) = runner_state
             key = jax.random.key(i)
             state = env.custom_reset_fn(key, random_reset=True)
-            res = (state.agent_pos, state.goal_pos)
+            res = (state.agent_pos, state.goal_pos, state.other_goal_pos)
             carry = (i+1,)
             return carry, res
         
         carry, res = jax.lax.scan(gen_held_out_toycoop, (0,), jnp.arange(100), 100)
-        ho_agent_pos, ho_goal_pos = res
+        ho_agent_pos, ho_goal_pos, ho_other_goal_pos = res
         
         # Set the held-out states in the environment
         env.held_out_agent_pos = ho_agent_pos
         env.held_out_goal_pos = ho_goal_pos
+        env.held_out_other_goal_pos = ho_other_goal_pos
     config["obs_dim"] = env.observation_space(env.agents[0]).shape
     return env
 
@@ -119,11 +118,11 @@ class ActorCriticRNN(nn.Module):
         obs, dones, agent_positions = x
         if self.config["GRAPH_NET"]:
             batch_size, num_envs, flattened_obs_dim = obs.shape
-            # if self.config["ENV_NAME"] == "overcooked":
-            #     reshaped_obs = obs.reshape(-1, 7,7,26)
-            # else:
-            #     reshaped_obs = obs.reshape(-1, 5,5,3)
-            reshaped_obs = obs.reshape(-1, *self.config["obs_dim"])
+            if self.config["ENV_NAME"] == "overcooked":
+                reshaped_obs = obs.reshape(-1, 7,7,26)
+            else:
+                reshaped_obs = obs.reshape(-1, 5,5,4)
+            # reshaped_obs = obs.reshape(-1, *self.config["obs_dim"])
             # # use 2 conv nets
             # embedding = nn.Conv(
             #     features=self.config["FC_DIM_SIZE"]*2,
@@ -169,8 +168,13 @@ class ActorCriticRNN(nn.Module):
         )(embedding)
         embedding = nn.relu(embedding)
 
-        rnn_in = (embedding, dones)
-        hidden, embedding = ScannedRNN()(hidden, rnn_in)
+        if self.config["LSTM"]:
+            rnn_in = (embedding, dones)
+            hidden, embedding = ScannedRNN()(hidden, rnn_in)
+        else:
+            # embedding = embedding.reshape((batch_size, num_envs, -1))
+            embedding = nn.Dense(self.config["GRU_HIDDEN_DIM"], kernel_init=orthogonal(2), bias_init=constant(0.0))(embedding)
+            embedding = nn.relu(embedding)
 
         #########
         # Actor
@@ -630,6 +634,13 @@ def main(config):
         finetune_appendage = "_improved_finetuneIK"
     else:
         finetune_appendage = "_improved"
+    
+    if config['ENV_KWARGS']['partial_obs']:
+        finetune_appendage += "_partial_obs"
+    if not config['LSTM']:
+        finetune_appendage += "_no_lstm"
+    if config['ENV_KWARGS']['incentivize_strat'] != 2:
+        finetune_appendage += f"_incentivize_strat_{config['ENV_KWARGS']['incentivize_strat']}"
     wandb.init(
         entity=config["ENTITY"],
         project=config["PROJECT"],
@@ -640,7 +651,24 @@ def main(config):
     filepath = f"ckpts/ippo/{config['ENV_NAME']}"
     if config["ENV_NAME"] == "overcooked":
         filepath += f"/{config['ENV_KWARGS']['layout']}"
-    filepath = f"{filepath}/ik{config["ENV_KWARGS"]["random_reset"]}/{config['ENV_KWARGS']['random_reset_fn']}/graph{config["GRAPH_NET"]}"
+    filepath = f'{filepath}/ik{config["ENV_KWARGS"]["random_reset"]}/{config["ENV_KWARGS"]["random_reset_fn"]}/graph{config["GRAPH_NET"]}'
+
+    #####################
+    # Load frozen params
+    #####################
+    frozen_param_stack = []
+
+    if config['FCP_KWARGS']['train_oracle']:
+        # only load 2 strategies
+        path = f"{filepath}/seed3_ckpt16_improved_incentivize_strat_0.pkl"
+        with open(path, "rb") as f:
+            frozen_ckpt = pickle.load(f)
+            frozen_param_stack.append(frozen_ckpt['params'])
+        path = f"{filepath}/seed3_ckpt16_improved_incentivize_strat_1.pkl"
+        with open(path, "rb") as f:
+            frozen_ckpt = pickle.load(f)
+            frozen_param_stack.append(frozen_ckpt['params'])
+        finetune_appendage += "_oracle"
 
     if not config['TRAIN_KWARGS']['overwrite_ckpt']:
         # check if ckpt exists
@@ -676,18 +704,28 @@ def main(config):
         rng = jax.random.PRNGKey(config["SEED"])
     
 
-    #####################
-    # Load frozen params
-    #####################
-    frozen_param_stack = []
-    ckpt_id_list = [0, 10, 19]
-    if config['ENV_KWARGS']['random_reset']:
-        ckpt_id_list = [9, 19, 29]
-    seed_list = range(6)
-    for ckpt_id in ckpt_id_list:
-        for ckpt_seed in seed_list:
-            if os.path.exists(f"{filepath}/seed{ckpt_seed}_ckpt{ckpt_id}_improved.pkl"):
-                with open(f"{filepath}/seed{ckpt_seed}_ckpt{ckpt_id}_improved.pkl", "rb") as f:
+
+
+    if len(frozen_param_stack) == 0:
+        ckpt_id_list = [0, 10, 19]
+        if config['ENV_KWARGS']['random_reset']:
+            ckpt_id_list = [9, 19, 29]
+        elif config['ENV_KWARGS']['partial_obs']:  # handle partial obs for toy env 
+            ckpt_id_list = [0, 1, 3]
+        elif config['ENV_KWARGS']['incentivize_strat'] == 3:
+            ckpt_id_list = [1, 2, 3]
+        seed_list = range(6)
+        for ckpt_id in ckpt_id_list:
+            for ckpt_seed in seed_list:
+                if os.path.exists(f"{filepath}/seed{ckpt_seed}_ckpt{ckpt_id}{finetune_appendage}.pkl"):
+                    path_to_open = f"{filepath}/seed{ckpt_seed}_ckpt{ckpt_id}{finetune_appendage}.pkl"
+                elif os.path.exists(f"{filepath}/seed{ckpt_seed}_ckpt{ckpt_id}_improved.pkl"):
+                    path_to_open = f"{filepath}/seed{ckpt_seed}_ckpt{ckpt_id}_improved.pkl"
+                elif os.path.exists(f"{filepath}/seed{ckpt_seed}_ckpt{ckpt_id}_improved_partial_obs.pkl"):
+                    path_to_open = f"{filepath}/seed{ckpt_seed}_ckpt{ckpt_id}_improved_partial_obs.pkl"
+                else:
+                    continue
+                with open(path_to_open, "rb") as f:
                     frozen_ckpt= pickle.load(f)
                     frozen_param_stack.append(frozen_ckpt['params'])
     num_stacked_params = len(frozen_param_stack)
